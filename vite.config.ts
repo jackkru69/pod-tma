@@ -9,6 +9,9 @@ import { nodePolyfills } from 'vite-plugin-node-polyfills';
 // https://vite.dev/config/
 export default defineConfig({
   base: "/flipcoin-tma/",
+  build: {
+    sourcemap: false,
+  },
   plugins: [
     vue(),
     vueDevTools(),
