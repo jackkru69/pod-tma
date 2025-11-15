@@ -228,6 +228,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { Address, toNano } from '@ton/core';
 import { useTonConnectUI } from '../tonconnect/useTonConnectUI';
+import { useTonWallet } from '../tonconnect/useTonWallet';
 import GameList from '../components/GameList.vue';
 import { useFlipCoinContract } from '../composables/useFlipCoinContract';
 import {
@@ -260,7 +261,8 @@ const {
 } = useFlipCoinContract(factoryAddress);
 
 const { tonConnectUI } = useTonConnectUI();
-const wallet = computed(() => tonConnectUI.wallet?.account.address);
+const { wallet: tonWallet } = useTonWallet();
+const wallet = computed(() => tonWallet.value?.account.address);
 
 // Create game modal
 const showCreateModal = ref(false);
@@ -303,6 +305,11 @@ const openBidGameId = ref<bigint>(BigInt(0));
 const openBidKey = ref('');
 
 async function connect() {
+  // Check if wallet is already connected to avoid error
+  if (tonConnectUI.connected) {
+    console.warn('Wallet is already connected');
+    return;
+  }
   await tonConnectUI.openModal();
 }
 
