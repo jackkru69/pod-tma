@@ -21,6 +21,7 @@
     "@tanstack/vue-query": "^5.90.7",
     "@tma.js/sdk-vue": "^1.0.7",
     "@ton/core": "^0.62.0",
+    "@ton/crypto": "^3.3.0",
     "@ton/ton": "^16.0.0",
     "@tonconnect/ui": "^2.0.9",
     "buffer": "^6.0.3",

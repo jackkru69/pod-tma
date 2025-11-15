@@ -227,8 +227,9 @@ import { useTonWallet } from '../tonconnect/useTonWallet';
 import GameList from '../components/GameList.vue';
 import { useFlipCoinContract } from '../composables/useFlipCoinContract';
 import {
-  calculateHash,
-  generateKeyFromWalletSignature,
+  generateSeedPhrase,
+  getSignatureFromSeed,
+  generateSecretKey,
   formatTon,
   shortenAddress,
   calculateCreateGameValue,
@@ -261,6 +262,33 @@ const {
 const { tonConnectUI } = useTonConnectUI();
 const { wallet: tonWallet } = useTonWallet();
 const wallet = computed(() => tonWallet.value?.account.address);
+
+// Storage for user's seed phrase (in production, use secure storage)
+const userSeedPhrase = ref<string[] | null>(null);
+
+// Initialize or load seed phrase
+onMounted(async () => {
+  if (factoryAddress) {
+    loadGames();
+  }
+  
+  // Try to load seed phrase from localStorage
+  const stored = localStorage.getItem('flipcoin_seed');
+  if (stored) {
+    try {
+      userSeedPhrase.value = JSON.parse(stored);
+    } catch (e) {
+      console.error('Failed to load seed phrase:', e);
+    }
+  }
+  
+  // Generate new seed phrase if not exists
+  if (!userSeedPhrase.value) {
+    userSeedPhrase.value = await generateSeedPhrase();
+    localStorage.setItem('flipcoin_seed', JSON.stringify(userSeedPhrase.value));
+    console.log('Generated new seed phrase:', userSeedPhrase.value.join(' '));
+  }
+});
 
 // Create TonClient instance
 let tonClient: TonClient | null = null;
@@ -327,33 +355,23 @@ async function disconnect() {
 }
 
 async function handleCreateGame() {
-  if (!wallet.value || !canCreateGame.value) return;
+  if (!wallet.value || !canCreateGame.value || !userSeedPhrase.value) return;
 
   creating.value = true;
   try {
     // Get next game ID (approximate)
     const nextGameId = stats.value ? stats.value.totalGamesCreated + BigInt(1) : BigInt(1);
 
-    // Generate key using wallet signature for maximum security
-    // This prevents brute force attacks as the key requires the wallet's private key
-    const generatedKey = await generateKeyFromWalletSignature(
-      nextGameId,
+    // Generate signature from seed phrase
+    const signature = getSignatureFromSeed(nextGameId, userSeedPhrase.value);
+
+    // Store signature as key (for opening bid later)
+    newGame.value.key = signature;
+
+    // Generate secret key (hash of coinSide + signature + playerAddress)
+    const secret = generateSecretKey(
       BigInt(newGame.value.coinSide),
-      Address.parse(wallet.value),
-      tonConnectUI
-    );
-
-    if (!generatedKey) {
-      alert('Не удалось создать игру: кошелек не поддерживает подпись данных');
-      return;
-    }
-
-    newGame.value.key = generatedKey;
-
-    // Calculate secret hash
-    const secret = calculateHash(
-      BigInt(newGame.value.coinSide),
-      newGame.value.key,
+      signature,
       Address.parse(wallet.value)
     );
 
@@ -412,30 +430,20 @@ async function handleJoinGame(gameId: bigint) {
 }
 
 async function confirmJoinGame() {
-  if (!wallet.value || !joinGameData.value || !canJoinGame.value) return;
+  if (!wallet.value || !joinGameData.value || !canJoinGame.value || !userSeedPhrase.value) return;
 
   joining.value = true;
   try {
-    // Generate key using wallet signature for maximum security
-    // This prevents brute force attacks as the key requires the wallet's private key
-    const generatedKey = await generateKeyFromWalletSignature(
-      joinGameData.value.gameId,
+    // Generate signature from seed phrase
+    const signature = getSignatureFromSeed(joinGameData.value.gameId, userSeedPhrase.value);
+
+    // Store signature as key (for opening bid later)
+    joinGame.value.key = signature;
+
+    // Generate secret key (hash of coinSide + signature + playerAddress)
+    const secret = generateSecretKey(
       BigInt(joinGame.value.coinSide),
-      Address.parse(wallet.value),
-      tonConnectUI
-    );
-
-    if (!generatedKey) {
-      alert('Не удалось присоединиться к игре: кошелек не поддерживает подпись данных');
-      return;
-    }
-
-    joinGame.value.key = generatedKey;
-
-    // Calculate secret hash
-    const secret = calculateHash(
-      BigInt(joinGame.value.coinSide),
-      joinGame.value.key,
+      signature,
       Address.parse(wallet.value)
     );
 
@@ -492,7 +500,7 @@ async function handleOpenBid(gameId: bigint) {
 }
 
 async function confirmOpenBid() {
-  if (!wallet.value) return;
+  if (!wallet.value || !userSeedPhrase.value) return;
 
   openingBid.value = true;
   try {
@@ -512,19 +520,11 @@ async function confirmOpenBid() {
     const sender = createTonConnectSender(tonConnectUI);
 
     // Try both coin sides - the contract will accept the correct one
-    // Generate keys for both HEADS and TAILS
-    const playerAddress = Address.parse(wallet.value);
+    // Generate signatures for both HEADS and TAILS from seed phrase
 
     // Try HEADS first
     try {
-      const keyHeads = await generateKeyFromWalletSignature(
-        openBidGameId.value,
-        BigInt(COIN_SIDE_HEADS),
-        playerAddress,
-        tonConnectUI
-      );
-
-      if(!keyHeads) throw new Error('Failed to generate key for HEADS');
+      const signatureHeads = getSignatureFromSeed(openBidGameId.value, userSeedPhrase.value);
 
       await game.send(
         sender,
@@ -534,7 +534,7 @@ async function confirmOpenBid() {
         },
         {
           $$type: 'OpenBidMsg',
-          key: keyHeads,
+          key: signatureHeads,
         }
       );
 
@@ -543,19 +543,16 @@ async function confirmOpenBid() {
       setTimeout(() => refreshGames(), 3000);
       return;
     } catch (headsError) {
-      console.log('HEADS key failed, trying TAILS...', headsError);
+      console.log('HEADS failed, trying TAILS...', headsError);
 
-      // Try TAILS
-      const keyTails = await generateKeyFromWalletSignature(
-        openBidGameId.value,
-        BigInt(COIN_SIDE_TAILS),
-        playerAddress,
-        tonConnectUI
-      );
-
-      if (!keyTails) {
-        throw new Error('Failed to generate key for both HEADS and TAILS');
-      }
+      // Since signature is the same for both sides (based on gameId + seed),
+      // and the secret was generated as hash(coinSide + signature),
+      // we need to try sending with the same signature
+      // The contract will validate against the stored secret
+      
+      // Actually, with seed-based approach, we use the same signature
+      // The contract checks hash(HEADS, signature, player) and hash(TAILS, signature, player)
+      const signatureTails = getSignatureFromSeed(openBidGameId.value, userSeedPhrase.value);
 
       await game.send(
         sender,
@@ -565,7 +562,7 @@ async function confirmOpenBid() {
         },
         {
           $$type: 'OpenBidMsg',
-          key: keyTails,
+          key: signatureTails,
         }
       );
 
@@ -622,12 +619,6 @@ async function handleCancelGame(gameId: bigint) {
     alert('Ошибка при отмене игры: ' + (e instanceof Error ? e.message : 'Unknown error'));
   }
 }
-
-onMounted(() => {
-  if (factoryAddress) {
-    loadGames();
-  }
-});
 </script>
 
 <style scoped>

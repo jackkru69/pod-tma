@@ -1,11 +1,59 @@
 import { Address, beginCell, toNano } from '@ton/core';
 import type { Sender, SenderArguments } from '@ton/core';
 import type { TonConnectUI } from '@tonconnect/ui';
+import { mnemonicNew } from '@ton/crypto';
+
+/**
+ * Generate new seed phrase (24 words) using TON crypto library
+ */
+export async function generateSeedPhrase(): Promise<string[]> {
+  return await mnemonicNew(24);
+}/**
+ * Generate signature from seed phrase and game ID
+ * @param gameId Game ID as bigint
+ * @param seedPhrase Array of 24 words
+ * @returns 256-bit signature as bigint
+ */
+export function getSignatureFromSeed(gameId: bigint, seedPhrase: string[]): bigint {
+  // Join seed phrase into single string
+  const seedString = seedPhrase.join(' ');
+
+  // Create message: gameId + seedPhrase
+  const message = beginCell()
+    .storeUint(gameId, 256)
+    .storeBuffer(Buffer.from(seedString, 'utf-8'))
+    .endCell();
+
+  // Use sha256 hash as signature
+  const hash = message.hash();
+
+  // Convert to bigint (256-bit number)
+  return BigInt('0x' + hash.toString('hex'));
+}
+
+/**
+ * Generate secret key for the game (this is what gets sent to contract as "secret")
+ * This must match the contract's calculateHash function exactly
+ * @param coinSide 2 for HEADS, 3 for TAILS
+ * @param signature Signature from getSignatureFromSeed (this is the "key" for opening)
+ * @param playerAddress Player's address
+ * @returns Secret key (hash of coinSide + signature + playerAddress)
+ */
+export function generateSecretKey(coinSide: bigint, signature: bigint, playerAddress: Address): bigint {
+  const builder = beginCell()
+    .storeUint(coinSide, 8)
+    .storeUint(signature, 256)
+    .storeAddress(playerAddress)
+    .endCell();
+
+  return BigInt('0x' + builder.hash().toString('hex'));
+}
 
 /**
  * Calculate hash for encrypted bet (matches contract's calculateHash function)
+ * This is used to verify the player's choice when opening the bid
  * @param coinSide 2 for HEADS, 3 for TAILS
- * @param key Random secret key (256-bit integer)
+ * @param key Secret signature (256-bit integer from getSignatureFromSeed)
  * @param playerAddress Player's address
  */
 export function calculateHash(coinSide: bigint, key: bigint, playerAddress: Address): bigint {
@@ -15,64 +63,6 @@ export function calculateHash(coinSide: bigint, key: bigint, playerAddress: Addr
   builder.storeAddress(playerAddress);
   return BigInt('0x' + builder.endCell().hash().toString('hex'));
 }
-
-/**
- * Generate secret key by signing message with wallet
- * This creates a cryptographically secure 256-bit key using wallet's private key signature
- * The key cannot be bruteforced as it requires the wallet's signature
- *
- * The key is used directly in the contract's calculateHash function:
- * hash = sha256(coinSide + key + playerAddress)
- *
- * When opening the bid, the contract verifies:
- * 1. Receives the key from the user
- * 2. Calculates hash(HEADS, key, player) and hash(TAILS, key, player)
- * 3. Compares with the stored encryptedBet
- * 4. If it matches, reveals the player's choice
- */
-export async function generateKeyFromWalletSignature(
-  gameId: bigint,
-  coinSide: bigint,
-  playerAddress: Address,
-  tonConnectUI: TonConnectUI
-): Promise<bigint | null> {
-  try {
-    // Create a deterministic message to sign based on game parameters
-    const message = beginCell()
-      .storeUint(gameId, 256)
-      .storeUint(coinSide, 8)
-      .storeAddress(playerAddress)
-      .endCell();
-
-    // Use TonConnect's signData method to get a cryptographic signature
-    // This makes the key wallet-specific and prevents brute-force attacks
-    const signResult = await tonConnectUI.connector.signData({
-      type: 'cell',
-      schema: 'game-key',
-      cell: message.toBoc().toString('base64')
-    });
-
-    // Use the signature as the key (take first 32 bytes as 256-bit number)
-    const signatureBuffer = Buffer.from(signResult.signature, 'base64');
-    const key = BigInt('0x' + signatureBuffer.slice(0, 32).toString('hex'));
-
-    return key;
-  } catch (error) {
-    console.warn('Wallet signature failed, using fallback key generation:', error);
-    return null;
-  }
-}
-/**
- * Generate deterministic key from game parameters
- * This creates a reproducible 256-bit key based on game ID, coin side, and player address
- *
- * WARNING: This is less secure than wallet signature as it can be computed by anyone
- * who knows the game parameters. Use generateKeyFromWalletSignature for production.
- *
- * The key is used directly in the contract's calculateHash function:
- * hash = sha256(coinSide + key + playerAddress)
- */
-
 
 /**
  * Create a Sender implementation using TonConnect UI
