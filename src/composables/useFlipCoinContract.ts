@@ -3,13 +3,13 @@ import { useQuery, useInfiniteQuery } from '@tanstack/vue-query';
 import { Address, TonClient } from '@ton/ton';
 import type { GameInfo, FactoryConfig, FactoryStats } from '../types/contract';
 import { getHttpEndpoint } from '@orbs-network/ton-access';
+import { FlipCoinGameFactory } from '../wrappers/FlipCoinGameFactory_FlipCoinGameFactory';
+import { Game } from '../wrappers/FlipCoinGameFactory_Game';
 
 const BATCH_SIZE = 10;
 
 // Create TonClient instance
 async function createTonClient() {
-  // const isTestnet = import.meta.env.VITE_NETWORK === 'testnet';
-
   return new TonClient({
     endpoint: await getHttpEndpoint({ network: 'testnet' }),
     apiKey: import.meta.env.VITE_TONCENTER_API_KEY || undefined,
@@ -19,88 +19,69 @@ async function createTonClient() {
 // Fetch factory statistics
 async function fetchFactoryStats(factoryAddress: string): Promise<FactoryStats> {
   const client = await createTonClient();
-  const factory = Address.parse(factoryAddress);
+  const address = Address.parse(factoryAddress);
+  const factory = client.open(FlipCoinGameFactory.fromAddress(address));
 
-  const result = await client.runMethod(factory, 'statistics');
-  const stack = result.stack;
-  const tuple = stack.readTuple();
+  const stats = await factory.getStatistics();
 
   return {
-    totalGamesCreated: tuple.readBigNumber(),
-    totalGamesInitialized: tuple.readBigNumber(),
-    totalGamesFinished: tuple.readBigNumber(),
-    totalGamesCancelled: tuple.readBigNumber(),
-    totalGamesDrawn: tuple.readBigNumber(),
+    totalGamesCreated: stats.totalGamesCreated,
+    totalGamesInitialized: stats.totalGamesInitialized,
+    totalGamesFinished: stats.totalGamesFinished,
+    totalGamesCancelled: stats.totalGamesCancelled,
+    totalGamesDrawn: stats.totalGamesDrawn,
   };
 }
 
 // Fetch factory configuration
 async function fetchFactoryConfig(factoryAddress: string): Promise<FactoryConfig> {
   const client = await createTonClient();
-  const factory = Address.parse(factoryAddress);
+  const address = Address.parse(factoryAddress);
+  const factory = client.open(FlipCoinGameFactory.fromAddress(address));
 
-  const result = await client.runMethod(factory, 'config');
-  const stack = result.stack;
-  const tuple = stack.readTuple();
+  const config = await factory.getConfig();
 
-  const config: FactoryConfig = {
-    serviceFeeNumerator: tuple.readBigNumber(),
-    referrerFeeNumerator: tuple.readBigNumber(),
-    waitingForOpenBidSeconds: tuple.readBigNumber(),
-    feeReceiver: tuple.readAddress(),
-    stopped: tuple.readBoolean(),
+  // Return config with default bid limits
+  return {
+    serviceFeeNumerator: config.serviceFeeNumerator,
+    referrerFeeNumerator: config.referrerFeeNumerator,
+    waitingForOpenBidSeconds: config.waitingForOpenBidSeconds,
+    feeReceiver: config.feeReceiver,
+    stopped: config.stopped,
+    lowestBid: BigInt(1_000_000_000), // 1 TON default
+    highestBid: BigInt(100_000_000_000), // 100 TON default
   };
-
-  // Load lowestBid and highestBid separately
-  try {
-    const lowestBidResult = await client.runMethod(factory, 'lowestBid');
-    config.lowestBid = lowestBidResult.stack.readBigNumber();
-  } catch (e) {
-    console.error('Failed to load lowestBid, using default:', e);
-    config.lowestBid = BigInt(1_000_000_000); // 1 TON default
-  }
-
-  try {
-    const highestBidResult = await client.runMethod(factory, 'highestBid');
-    config.highestBid = highestBidResult.stack.readBigNumber();
-  } catch (e) {
-    console.error('Failed to load highestBid, using default:', e);
-    config.highestBid = BigInt(100_000_000_000); // 100 TON default
-  }
-
-  return config;
 }
 
 // Fetch single game info
 async function fetchGameInfo(factoryAddress: string, gameId: number): Promise<GameInfo | null> {
   const client = await createTonClient();
-  const factory = Address.parse(factoryAddress);
+  const address = Address.parse(factoryAddress);
+  const factory = client.open(FlipCoinGameFactory.fromAddress(address));
 
   try {
     // Calculate game address
-    const gameAddressResult = await client.runMethod(factory, 'calculateGameAddress', [
-      { type: 'int', value: BigInt(gameId) },
-    ]);
-    const gameAddress = gameAddressResult.stack.readAddress();
+    const gameAddress = await factory.getCalculateGameAddress(BigInt(gameId));
+
+    // Open game contract
+    const game = client.open(Game.fromAddress(gameAddress));
 
     // Get game info
-    const gameInfoResult = await client.runMethod(gameAddress, 'gameInfo');
-    const gameStack = gameInfoResult.stack;
-    const gameTuple = gameStack.readTuple();
+    const gameInfo = await game.getGameInfo();
 
     return {
-      gameId: gameTuple.readBigNumber(),
-      status: gameTuple.readBigNumber(),
-      playerOne: gameTuple.readAddress(),
-      playerTwo: gameTuple.readAddress(),
-      bidValue: gameTuple.readBigNumber(),
-      totalGainings: gameTuple.readBigNumber(),
-      playerOneChosenSide: gameTuple.readBigNumber(),
-      playerTwoChosenSide: gameTuple.readBigNumber(),
-      gameCreatedTimestamp: gameTuple.readBigNumber(),
-      gameStartedTimestamp: gameTuple.readBigNumber(),
-      winner: gameTuple.readAddress(),
-      configReceived: gameTuple.readBoolean(),
+      gameId: gameInfo.gameId,
+      status: gameInfo.status,
+      playerOne: gameInfo.playerOne,
+      playerTwo: gameInfo.playerTwo,
+      bidValue: gameInfo.bidValue,
+      totalGainings: gameInfo.totalGainings,
+      playerOneChosenSide: gameInfo.playerOneChosenSide,
+      playerTwoChosenSide: gameInfo.playerTwoChosenSide,
+      gameCreatedTimestamp: gameInfo.gameCreatedTimestamp,
+      gameStartedTimestamp: gameInfo.gameStartedTimestamp,
+      winner: gameInfo.winner,
+      configReceived: gameInfo.configReceived,
     };
   } catch (e) {
     console.error(`Failed to load game ${gameId}:`, e);

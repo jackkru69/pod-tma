@@ -188,21 +188,14 @@
       <div v-if="showOpenBidModal" class="modal-overlay" @click.self="showOpenBidModal = false">
         <div class="modal">
           <div class="modal-header">
-            <h3>Раскрыть ставку</h3>
+            <h3>Раскрыть ставку в игре #{{ openBidGameId }}</h3>
             <button @click="showOpenBidModal = false" class="btn-close">×</button>
           </div>
 
           <div class="modal-body">
-            <p>Введите ваш секретный ключ для раскрытия ставки:</p>
-            <div class="form-group">
-              <input
-                v-model="openBidKey"
-                type="text"
-                placeholder="Секретный ключ"
-              />
-              <div class="hint">
-                Это ключ, который был сгенерирован при создании/присоединении к игре
-              </div>
+            <p>Ваша ставка будет автоматически раскрыта с использованием вашего кошелька.</p>
+            <div class="hint">
+              Система автоматически определит какую сторону вы выбрали при создании/присоединении к игре.
             </div>
           </div>
 
@@ -213,9 +206,9 @@
             <button
               @click="confirmOpenBid"
               class="btn-primary"
-              :disabled="!openBidKey || openingBid"
+              :disabled="openingBid"
             >
-              {{ openingBid ? 'Раскрытие...' : 'Раскрыть' }}
+              {{ openingBid ? 'Раскрытие...' : 'Раскрыть ставку' }}
             </button>
           </div>
         </div>
@@ -227,19 +220,24 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Address, toNano } from '@ton/core';
+import { TonClient } from '@ton/ton';
+import { getHttpEndpoint } from '@orbs-network/ton-access';
 import { useTonConnectUI } from '../tonconnect/useTonConnectUI';
 import { useTonWallet } from '../tonconnect/useTonWallet';
 import GameList from '../components/GameList.vue';
 import { useFlipCoinContract } from '../composables/useFlipCoinContract';
 import {
   calculateHash,
-  generateRandomKey,
+  generateKeyFromWalletSignature,
   formatTon,
   shortenAddress,
   calculateCreateGameValue,
   calculateJoinGameValue,
+  createTonConnectSender,
 } from '../utils/contract';
 import { COIN_SIDE_HEADS, COIN_SIDE_TAILS, type GameInfo } from '../types/contract';
+import { FlipCoinGameFactory } from '../wrappers/FlipCoinGameFactory_FlipCoinGameFactory';
+import { Game } from '../wrappers/FlipCoinGameFactory_Game';
 
 const factoryAddress = import.meta.env.VITE_FLIPCOIN_FACTORY_ADDRESS;
 
@@ -263,6 +261,19 @@ const {
 const { tonConnectUI } = useTonConnectUI();
 const { wallet: tonWallet } = useTonWallet();
 const wallet = computed(() => tonWallet.value?.account.address);
+
+// Create TonClient instance
+let tonClient: TonClient | null = null;
+
+async function getTonClient() {
+  if (!tonClient) {
+    tonClient = new TonClient({
+      endpoint: await getHttpEndpoint({ network: 'testnet' }),
+      apiKey: import.meta.env.VITE_TONCENTER_API_KEY || undefined,
+    });
+  }
+  return tonClient;
+}
 
 // Create game modal
 const showCreateModal = ref(false);
@@ -302,10 +313,8 @@ const canJoinGame = computed(() => {
 const showOpenBidModal = ref(false);
 const openingBid = ref(false);
 const openBidGameId = ref<bigint>(BigInt(0));
-const openBidKey = ref('');
 
 async function connect() {
-  // Check if wallet is already connected to avoid error
   if (tonConnectUI.connected) {
     console.warn('Wallet is already connected');
     return;
@@ -322,8 +331,24 @@ async function handleCreateGame() {
 
   creating.value = true;
   try {
-    // Generate random key
-    newGame.value.key = generateRandomKey();
+    // Get next game ID (approximate)
+    const nextGameId = stats.value ? stats.value.totalGamesCreated + BigInt(1) : BigInt(1);
+
+    // Generate key using wallet signature for maximum security
+    // This prevents brute force attacks as the key requires the wallet's private key
+    const generatedKey = await generateKeyFromWalletSignature(
+      nextGameId,
+      BigInt(newGame.value.coinSide),
+      Address.parse(wallet.value),
+      tonConnectUI
+    );
+
+    if (!generatedKey) {
+      alert('Не удалось создать игру: кошелек не поддерживает подпись данных');
+      return;
+    }
+
+    newGame.value.key = generatedKey;
 
     // Calculate secret hash
     const secret = calculateHash(
@@ -332,14 +357,44 @@ async function handleCreateGame() {
       Address.parse(wallet.value)
     );
 
-    // TODO: Send transaction to create game
-    console.log('Creating game with secret:', secret);
-    console.log('Keep your key safe:', newGame.value.key);
+    // Prepare referrer address
+    const referrerAddress = newGame.value.hasReferrer && newGame.value.referrerAddress
+      ? Address.parse(newGame.value.referrerAddress)
+      : null;
 
-    alert(`Игра создана!\n\nВаш секретный ключ: ${newGame.value.key}\n\nСОХРАНИТЕ ЕГО! Он понадобится для раскрытия ставки.`);
+    // Get TonClient and open factory contract
+    const client = await getTonClient();
+    const factory = client.open(
+      FlipCoinGameFactory.fromAddress(Address.parse(factoryAddress))
+    );
+
+    // Create sender
+    const sender = createTonConnectSender(tonConnectUI);
+
+    // Calculate total value needed
+    const totalValue = calculateCreateGameValue(newGame.value.bidValue);
+
+    // Send CreateGameMsg through wrapper
+    await factory.send(
+      sender,
+      {
+        value: totalValue,
+        bounce: true,
+      },
+      {
+        $$type: 'CreateGameMsg',
+        bidValue: toNano(newGame.value.bidValue),
+        secret: secret,
+        referrer: referrerAddress,
+      }
+    );
+
+    alert('Игра создана! Теперь ждите, когда другой игрок присоединится.');
 
     showCreateModal.value = false;
-    await refreshGames();
+
+    // Wait a bit for the transaction to be processed, then refresh
+    setTimeout(() => refreshGames(), 3000);
   } catch (e) {
     console.error('Failed to create game:', e);
     alert('Ошибка при создании игры: ' + (e instanceof Error ? e.message : 'Unknown error'));
@@ -361,8 +416,21 @@ async function confirmJoinGame() {
 
   joining.value = true;
   try {
-    // Generate random key
-    joinGame.value.key = generateRandomKey();
+    // Generate key using wallet signature for maximum security
+    // This prevents brute force attacks as the key requires the wallet's private key
+    const generatedKey = await generateKeyFromWalletSignature(
+      joinGameData.value.gameId,
+      BigInt(joinGame.value.coinSide),
+      Address.parse(wallet.value),
+      tonConnectUI
+    );
+
+    if (!generatedKey) {
+      alert('Не удалось присоединиться к игре: кошелек не поддерживает подпись данных');
+      return;
+    }
+
+    joinGame.value.key = generatedKey;
 
     // Calculate secret hash
     const secret = calculateHash(
@@ -371,14 +439,45 @@ async function confirmJoinGame() {
       Address.parse(wallet.value)
     );
 
-    // TODO: Send transaction to join game
-    console.log('Joining game with secret:', secret);
-    console.log('Keep your key safe:', joinGame.value.key);
+    // Prepare referrer address
+    const referrerAddress = joinGame.value.hasReferrer && joinGame.value.referrerAddress
+      ? Address.parse(joinGame.value.referrerAddress)
+      : null;
 
-    alert(`Вы присоединились к игре!\n\nВаш секретный ключ: ${joinGame.value.key}\n\nСОХРАНИТЕ ЕГО! Он понадобится для раскрытия ставки.`);
+    // Get TonClient and open factory contract
+    const client = await getTonClient();
+    const factory = client.open(
+      FlipCoinGameFactory.fromAddress(Address.parse(factoryAddress))
+    );
+
+    // Create sender
+    const sender = createTonConnectSender(tonConnectUI);
+
+    // Calculate total value needed
+    const totalValue = calculateJoinGameValue(joinGameData.value.bidValue);
+
+    // Send ForwardJoinGameMsg through wrapper
+    await factory.send(
+      sender,
+      {
+        value: totalValue,
+        bounce: true,
+      },
+      {
+        $$type: 'ForwardJoinGameMsg',
+        gameId: joinGameData.value.gameId,
+        bidValue: joinGameData.value.bidValue,
+        secret: secret,
+        referrer: referrerAddress,
+      }
+    );
+
+    alert('Вы присоединились к игре! Ожидайте завершения игры.');
 
     showJoinModal.value = false;
-    await refreshGames();
+
+    // Wait a bit for the transaction to be processed, then refresh
+    setTimeout(() => refreshGames(), 3000);
   } catch (e) {
     console.error('Failed to join game:', e);
     alert('Ошибка при присоединении: ' + (e instanceof Error ? e.message : 'Unknown error'));
@@ -393,19 +492,87 @@ async function handleOpenBid(gameId: bigint) {
 }
 
 async function confirmOpenBid() {
-  if (!wallet.value || !openBidKey.value) return;
+  if (!wallet.value) return;
 
   openingBid.value = true;
   try {
-    // TODO: Send transaction to open bid
-    console.log('Opening bid for game:', openBidGameId.value);
-    console.log('With key:', openBidKey.value);
+    // Get TonClient
+    const client = await getTonClient();
 
-    alert('Ставка раскрыта!');
+    // Get factory and calculate game address
+    const factory = client.open(
+      FlipCoinGameFactory.fromAddress(Address.parse(factoryAddress))
+    );
+    const gameAddress = await factory.getCalculateGameAddress(openBidGameId.value);
 
-    showOpenBidModal.value = false;
-    openBidKey.value = '';
-    await refreshGames();
+    // Open game contract
+    const game = client.open(Game.fromAddress(gameAddress));
+
+    // Create sender
+    const sender = createTonConnectSender(tonConnectUI);
+
+    // Try both coin sides - the contract will accept the correct one
+    // Generate keys for both HEADS and TAILS
+    const playerAddress = Address.parse(wallet.value);
+
+    // Try HEADS first
+    try {
+      const keyHeads = await generateKeyFromWalletSignature(
+        openBidGameId.value,
+        BigInt(COIN_SIDE_HEADS),
+        playerAddress,
+        tonConnectUI
+      );
+
+      if(!keyHeads) throw new Error('Failed to generate key for HEADS');
+
+      await game.send(
+        sender,
+        {
+          value: toNano('1'), // 1 TON for gas
+          bounce: true,
+        },
+        {
+          $$type: 'OpenBidMsg',
+          key: keyHeads,
+        }
+      );
+
+      alert('Ставка раскрыта!');
+      showOpenBidModal.value = false;
+      setTimeout(() => refreshGames(), 3000);
+      return;
+    } catch (headsError) {
+      console.log('HEADS key failed, trying TAILS...', headsError);
+
+      // Try TAILS
+      const keyTails = await generateKeyFromWalletSignature(
+        openBidGameId.value,
+        BigInt(COIN_SIDE_TAILS),
+        playerAddress,
+        tonConnectUI
+      );
+
+      if (!keyTails) {
+        throw new Error('Failed to generate key for both HEADS and TAILS');
+      }
+
+      await game.send(
+        sender,
+        {
+          value: toNano('1'), // 1 TON for gas
+          bounce: true,
+        },
+        {
+          $$type: 'OpenBidMsg',
+          key: keyTails,
+        }
+      );
+
+      alert('Ставка раскрыта!');
+      showOpenBidModal.value = false;
+      setTimeout(() => refreshGames(), 3000);
+    }
   } catch (e) {
     console.error('Failed to open bid:', e);
     alert('Ошибка при раскрытии ставки: ' + (e instanceof Error ? e.message : 'Unknown error'));
@@ -418,11 +585,38 @@ async function handleCancelGame(gameId: bigint) {
   if (!confirm('Вы уверены, что хотите отменить игру?')) return;
 
   try {
-    // TODO: Send transaction to cancel game
-    console.log('Canceling game:', gameId);
+    // Get TonClient
+    const client = await getTonClient();
+
+    // Get factory and calculate game address
+    const factory = client.open(
+      FlipCoinGameFactory.fromAddress(Address.parse(factoryAddress))
+    );
+    const gameAddress = await factory.getCalculateGameAddress(gameId);
+
+    // Open game contract
+    const game = client.open(Game.fromAddress(gameAddress));
+
+    // Create sender
+    const sender = createTonConnectSender(tonConnectUI);
+
+    // Send CancelGameMsg through wrapper
+    await game.send(
+      sender,
+      {
+        value: toNano('0.05'), // Small amount for gas
+        bounce: true,
+      },
+      {
+        $$type: 'CancelGameMsg',
+        gameId: gameId,
+      }
+    );
 
     alert('Игра отменена');
-    await refreshGames();
+
+    // Wait a bit for the transaction to be processed, then refresh
+    setTimeout(() => refreshGames(), 3000);
   } catch (e) {
     console.error('Failed to cancel game:', e);
     alert('Ошибка при отмене игры: ' + (e instanceof Error ? e.message : 'Unknown error'));
