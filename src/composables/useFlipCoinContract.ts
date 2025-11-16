@@ -18,11 +18,13 @@ async function createTonClient() {
 
 // Fetch factory statistics
 async function fetchFactoryStats(factoryAddress: string): Promise<FactoryStats> {
+  console.log('Fetching factory stats for:', factoryAddress);
   const client = await createTonClient();
   const address = Address.parse(factoryAddress);
   const factory = client.open(FlipCoinGameFactory.fromAddress(address));
 
   const stats = await factory.getStatistics();
+  console.log('Factory stats:', stats);
 
   return {
     totalGamesCreated: stats.totalGamesCreated,
@@ -97,16 +99,18 @@ async function fetchGamesBatch(
 ): Promise<GameInfo[]> {
   const gameInfos: GameInfo[] = [];
 
-  // Fetch games in parallel
+  // Fetch games in parallel (from startId down to startId - count + 1)
   const promises = [];
   for (let i = 0; i < count; i++) {
-    const gameId = startId + i;
-    promises.push(fetchGameInfo(factoryAddress, gameId));
+    const gameId = startId - i;
+    if (gameId >= 1) {
+      promises.push(fetchGameInfo(factoryAddress, gameId));
+    }
   }
 
   const results = await Promise.all(promises);
 
-  // Filter out null results
+  // Filter out null results and maintain order (newest first)
   for (const result of results) {
     if (result) {
       gameInfos.push(result);
@@ -142,33 +146,69 @@ export function useFlipCoinContract(factoryAddress: string) {
     queryKey: ['flipcoin', 'games', factoryAddress],
     queryFn: async ({ pageParam }) => {
       const param = pageParam as GamesPageParam;
+      console.log('Fetching games with pageParam:', param);
 
-      if (!param.totalGames || param.startId < 1) {
+      // Get current total games from stats
+      const currentStats = statsQuery.data.value;
+      if (!currentStats) {
+        console.log('No stats available yet');
         return [];
       }
 
-      const count = Math.min(BATCH_SIZE, param.startId);
-      const games = await fetchGamesBatch(factoryAddress, param.startId, count);
+      const totalGames = Number(currentStats.totalGamesCreated);
+      console.log('Total games:', totalGames);
+      
+      if (totalGames === 0) {
+        console.log('No games created yet');
+        return [];
+      }
+
+      // If this is the first page, start from the last game
+      let startId = param.startId;
+      if (startId === 0) {
+        startId = totalGames;
+      }
+
+      console.log('Starting from game ID:', startId);
+
+      if (startId < 1) {
+        console.log('Invalid startId:', startId);
+        return [];
+      }
+
+      const count = Math.min(BATCH_SIZE, startId);
+      console.log('Fetching', count, 'games');
+      const games = await fetchGamesBatch(factoryAddress, startId, count);
+      console.log('Fetched games:', games);
 
       return games;
     },
     initialPageParam: { startId: 0, totalGames: 0 } as GamesPageParam,
     getNextPageParam: (lastPage, _allPages, lastPageParam) => {
       const param = lastPageParam as GamesPageParam;
-
-      if (!param.totalGames || param.startId <= 1) {
+      const currentStats = statsQuery.data.value;
+      
+      if (!currentStats) {
         return undefined;
       }
 
-      const remainingStart = param.startId - lastPage.length;
+      const totalGames = Number(currentStats.totalGamesCreated);
 
-      if (remainingStart < 1) {
+      // If this is the first page, calculate next start
+      let nextStart = param.startId;
+      if (nextStart === 0) {
+        nextStart = totalGames - lastPage.length;
+      } else {
+        nextStart = param.startId - lastPage.length;
+      }
+
+      if (nextStart < 1) {
         return undefined;
       }
 
       return {
-        startId: remainingStart,
-        totalGames: param.totalGames,
+        startId: nextStart,
+        totalGames: totalGames,
       } as GamesPageParam;
     },
     enabled: computed(() => {
@@ -185,9 +225,9 @@ export function useFlipCoinContract(factoryAddress: string) {
   const games = computed(() => {
     if (!gamesQuery.data.value?.pages) return [];
 
-    // Flatten all pages and reverse to show newest first
+    // Flatten all pages - games are already in reverse order (newest first)
     const allGames = gamesQuery.data.value.pages.flat();
-    return allGames.reverse();
+    return allGames;
   });
 
   const loading = computed(() =>
