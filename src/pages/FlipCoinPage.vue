@@ -79,6 +79,9 @@
                 Минимум: {{ formatTon(config.lowestBid) }} TON,
                 Максимум: {{ formatTon(config.highestBid) }} TON
               </div>
+              <div class="hint info-hint" style="margin-top: 0.5rem; color: #4a9eff;">
+                💡 Общая сумма = ставка + 0.25 TON (комиссии сети и развертывание контракта)
+              </div>
             </div>
 
             <div class="form-group">
@@ -97,7 +100,12 @@
             <div class="total-cost" v-if="newGame.bidValue">
               Общая стоимость:
               <strong>{{ formatTon(calculateCreateGameValue(newGame.bidValue)) }} TON</strong>
-              <div class="hint">(ставка + комиссии сети)</div>
+              <div class="hint">
+                = {{ newGame.bidValue }} TON (ставка)<br>
+                + 0.15 TON (развертывание контракта)<br>
+                + 0.05 TON (резерв фабрики)<br>
+                + 0.05 TON (газ)
+              </div>
             </div>
           </div>
 
@@ -166,7 +174,11 @@
             <div class="total-cost" v-if="joinGameData">
               Общая стоимость:
               <strong>{{ formatTon(calculateJoinGameValue(joinGameData.bidValue)) }} TON</strong>
-              <div class="hint">(ставка + комиссии сети)</div>
+              <div class="hint">
+                = {{ formatTon(joinGameData.bidValue) }} TON (ставка)<br>
+                + 0.05 TON (резерв фабрики)<br>
+                + 0.05 TON (газ)
+              </div>
             </div>
           </div>
 
@@ -465,6 +477,11 @@ async function handleCreateGame() {
 
     // Calculate total value needed
     const totalValue = calculateCreateGameValue(newGame.value.bidValue);
+    console.log('Creating game with:', {
+      bidValue: newGame.value.bidValue,
+      totalValue: totalValue.toString(),
+      totalValueTON: formatTon(totalValue),
+    });
 
     // Send CreateGameMsg through wrapper
     await factory.send(
@@ -537,6 +554,12 @@ async function confirmJoinGame() {
 
     // Calculate total value needed
     const totalValue = calculateJoinGameValue(joinGameData.value.bidValue);
+    console.log('Joining game with:', {
+      gameId: joinGameData.value.gameId.toString(),
+      bidValue: joinGameData.value.bidValue.toString(),
+      totalValue: totalValue.toString(),
+      totalValueTON: formatTon(totalValue),
+    });
 
     // Send ForwardJoinGameMsg through wrapper
     await factory.send(
@@ -603,7 +626,7 @@ async function confirmOpenBid() {
       await game.send(
         sender,
         {
-          value: toNano('1'), // 1 TON for gas
+          value: toNano('0.1'), // 0.1 TON for gas
           bounce: true,
         },
         {
@@ -631,7 +654,7 @@ async function confirmOpenBid() {
       await game.send(
         sender,
         {
-          value: toNano('1'), // 1 TON for gas
+          value: toNano('0.1'), // 0.1 TON for gas
           bounce: true,
         },
         {

@@ -119,11 +119,12 @@ export function calculateCreateGameValue(bidValue: string): bigint {
 
 /**
  * Calculate required value for joining a game
- * bidValue + gasBuffer
+ * bidValue + factoryReserve + gasBuffer
  */
 export function calculateJoinGameValue(bidValue: bigint): bigint {
+  const factoryReserve = toNano('0.05');
   const gasBuffer = toNano('0.05');
-  return bidValue + gasBuffer;
+  return bidValue + factoryReserve + gasBuffer;
 }
 
 /**

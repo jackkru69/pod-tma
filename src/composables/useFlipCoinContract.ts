@@ -157,7 +157,7 @@ export function useFlipCoinContract(factoryAddress: string) {
 
       const totalGames = Number(currentStats.totalGamesCreated);
       console.log('Total games:', totalGames);
-      
+
       if (totalGames === 0) {
         console.log('No games created yet');
         return [];
@@ -187,7 +187,7 @@ export function useFlipCoinContract(factoryAddress: string) {
     getNextPageParam: (lastPage, _allPages, lastPageParam) => {
       const param = lastPageParam as GamesPageParam;
       const currentStats = statsQuery.data.value;
-      
+
       if (!currentStats) {
         return undefined;
       }
